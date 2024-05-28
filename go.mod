@@ -1,4 +1,4 @@
-module github.com/invzhi/caddy-docker-upstreams
+module github.com/manyou-io/caddy-docker-upstreams
 
 go 1.20
 
