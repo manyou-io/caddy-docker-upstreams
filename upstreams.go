@@ -38,6 +38,14 @@ var (
 	candidatesMu sync.RWMutex
 )
 
+var defaultFilters = filters.NewArgs(
+	filters.Arg("label", LabelEnable),
+	// types.ContainerState.Status
+	filters.Arg("status", "running"),
+	filters.Arg("health", types.Healthy),
+	filters.Arg("health", types.NoHealthcheck),
+)
+
 // Upstreams provides upstreams from the docker host.
 type Upstreams struct {
 	logger *zap.Logger
@@ -50,36 +58,12 @@ func (Upstreams) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
-func (u *Upstreams) inspectContainers(ctx caddy.Context, dockerClient client.ContainerAPIClient, container types.Container) types.ContainerJSON {
-	containerInspected, err := dockerClient.ContainerInspect(ctx, container.ID)
-	if err != nil {
-		u.logger.Error("Failed to inspect container",
-			zap.String("container_id", container.ID),
-			zap.Error(err),
-		)
-		return types.ContainerJSON{}
-	}
-
-	// This condition is here to avoid to have empty IP https://github.com/traefik/traefik/issues/2459
-	// We register only container which are running
-	if containerInspected.ContainerJSONBase != nil && containerInspected.ContainerJSONBase.State != nil && containerInspected.ContainerJSONBase.State.Running {
-		return containerInspected
-	}
-
-	return types.ContainerJSON{}
-}
-
-func (u *Upstreams) provisionCandidates(ctx caddy.Context, containers []types.ContainerJSON) {
+func (u *Upstreams) provisionCandidates(ctx caddy.Context, containers []types.Container) {
 	updated := make([]candidate, 0, len(containers))
 
 	for _, container := range containers {
 		// Check enable.
-		if enable, ok := container.Config.Labels[LabelEnable]; !ok || enable != "true" {
-			continue
-		}
-
-		// Check health.
-		if container.State != nil && container.State.Health != nil && container.State.Health.Status != types.Healthy {
+		if enable, ok := container.Labels[LabelEnable]; !ok || enable != "true" {
 			continue
 		}
 
@@ -87,7 +71,7 @@ func (u *Upstreams) provisionCandidates(ctx caddy.Context, containers []types.Co
 		var matchers caddyhttp.MatcherSet
 
 		for key, producer := range producers {
-			value, ok := container.Config.Labels[key]
+			value, ok := container.Labels[key]
 			if !ok {
 				continue
 			}
@@ -118,7 +102,7 @@ func (u *Upstreams) provisionCandidates(ctx caddy.Context, containers []types.Co
 		}
 
 		// Build upstream.
-		port, ok := container.Config.Labels[LabelUpstreamPort]
+		port, ok := container.Labels[LabelUpstreamPort]
 		if !ok {
 			u.logger.Error("unable to get port from container labels",
 				zap.String("container_id", container.ID),
@@ -164,23 +148,12 @@ func (u *Upstreams) keepUpdated(ctx caddy.Context, cli *client.Client) {
 			select {
 			case <-messages:
 				debounced(func() {
-					containerList, err := cli.ContainerList(ctx, types.ContainerListOptions{
-						Filters: filters.NewArgs(filters.Arg("label", LabelEnable)),
+					containers, err := cli.ContainerList(ctx, types.ContainerListOptions{
+						Filters: defaultFilters,
 					})
 					if err != nil {
 						u.logger.Error("unable to get the list of containers", zap.Error(err))
 						return
-					}
-
-					var containers []types.ContainerJSON
-					// get inspect containers
-					for _, c := range containerList {
-						container := u.inspectContainers(ctx, cli, c)
-						if len(container.Name) == 0 {
-							continue
-						}
-
-						containers = append(containers, container)
 					}
 
 					u.provisionCandidates(ctx, containers)
@@ -218,22 +191,11 @@ func (u *Upstreams) Provision(ctx caddy.Context) error {
 
 	u.logger.Info("docker engine is connected", zap.String("api_version", ping.APIVersion))
 
-	containerList, err := cli.ContainerList(ctx, types.ContainerListOptions{
-		Filters: filters.NewArgs(filters.Arg("label", LabelEnable)),
+	containers, err := cli.ContainerList(ctx, types.ContainerListOptions{
+		Filters: defaultFilters,
 	})
 	if err != nil {
 		return err
-	}
-
-	var containers []types.ContainerJSON
-	// get inspect containers
-	for _, c := range containerList {
-		container := u.inspectContainers(ctx, cli, c)
-		if len(container.Name) == 0 {
-			continue
-		}
-
-		containers = append(containers, container)
 	}
 
 	u.provisionCandidates(ctx, containers)
